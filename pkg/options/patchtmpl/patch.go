@@ -48,6 +48,9 @@ type applier struct {
 
 	// Set the template options
 	templateOpts []string
+
+	// Policy for handling residual "<no value>" literals in rendered patches.
+	noValuePolicy options.NoValuePolicy
 }
 
 // WithPatcherScheme modifies NewApplierWithConfig so that the returned Applier
@@ -82,6 +85,21 @@ func WithIncludeTemplates(include bool) ApplierConfig {
 	}
 }
 
+// WithNoValuePolicy modifies NewApplierWithConfig so that the returned
+// Applier checks rendered patches for the residual "<no value>" literal
+// (emitted by text/template for missing or nil values when a lenient
+// missingkey option is used) and reacts according to the given policy. The
+// default policy is options.NoValueWarn.
+//
+// Note: the check is a plain substring check on the rendered output. If a
+// patch legitimately needs to emit the literal "<no value>", there is no way
+// to escape it; disable the check with options.NoValueIgnore instead.
+func WithNoValuePolicy(policy options.NoValuePolicy) ApplierConfig {
+	return func(a *applier) {
+		a.noValuePolicy = policy
+	}
+}
+
 // NewApplierWithConfig creates a new options applier instance with the
 // specified config options.
 func NewApplierWithConfig(opts ...ApplierConfig) options.Applier {
@@ -90,6 +108,7 @@ func NewApplierWithConfig(opts ...ApplierConfig) options.Applier {
 		tmplFilter:       nil,
 		includeTemplates: false,
 		templateOpts:     []string{},
+		noValuePolicy:    options.NoValueWarn,
 	}
 
 	for _, opt := range opts {
@@ -122,13 +141,21 @@ func NewDefaultApplier() options.Applier {
 // ApplyOptions looks for PatchTemplates and applies them to the component objects.
 func (a *applier) ApplyOptions(comp *bundle.Component, p options.JSONOptions) (*bundle.Component, error) {
 	comp = comp.DeepCopy()
+
+	// Resolve component-scoped options: global options overlaid with the
+	// blocks matching this component's name and name@version.
+	p, err := options.OptionsForComponent(comp.ComponentReference(), p)
+	if err != nil {
+		return nil, fmt.Errorf("for component %v, resolving scoped options: %v", comp.ComponentReference(), err)
+	}
+
 	patchTemplates, objects := a.getPatchTemplates(comp)
 	if len(patchTemplates) < 1 {
 		return comp, nil
 	}
 	patches, objs, err := a.makePatches(patchTemplates, objects, p)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("for component %v: %v", comp.ComponentReference(), err)
 	}
 	newObjs, err := options.ApplyCommon(comp.ComponentReference(), objs, p, objectApplier(a.scheme, patches))
 	comp.Spec.Objects = newObjs
@@ -228,6 +255,10 @@ func (a *applier) makePatches(ptObjs, objs []*unstructured.Unstructured, opts op
 		err = tmpl.Execute(&buf, newOpts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("while applying options to patch template %d: %v", j, err)
+		}
+
+		if err := options.CheckNoValueResidue(buf.String(), fmt.Sprintf("patch template %d", j), a.noValuePolicy); err != nil {
+			return nil, nil, err
 		}
 
 		// Convert the patch into a JSONMap to prepare for Strategic Merge Patch.

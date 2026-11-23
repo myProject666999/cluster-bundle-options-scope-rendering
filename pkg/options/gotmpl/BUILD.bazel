@@ -19,10 +19,12 @@ go_test(
     name = "go_default_test",
     srcs = [
         "go_template_applier_benchmark_test.go",
+        "go_template_applier_scope_test.go",
         "go_template_applier_test.go",
     ],
     embed = [":go_default_library"],
     deps = [
+        "//pkg/apis/bundle/v1alpha1:go_default_library",
         "//pkg/converter:go_default_library",
         "//pkg/options:go_default_library",
         "//pkg/testutil:go_default_library",

@@ -47,13 +47,36 @@ type ApplierConfig func(*applier)
 type applier struct {
 	goTmplOptions        []string
 	useSafeYAMLTemplater bool
+	noValuePolicy        options.NoValuePolicy
 }
 
 // WithGoTmplOptions modifies NewApplier so that the returned Applier uses the
 // specified Go text/template options.
+//
+// If no Go template options are specified, the applier defaults to
+// "missingkey=error" (options.MissingKeyError), matching the patch-template
+// applier: referencing an option key that was not provided is an error. To
+// restore the historical lenient behavior — where missing keys render as
+// "<no value>" — pass options.MissingKeyDefault (or options.MissingKeyZero)
+// explicitly.
 func WithGoTmplOptions(goTmplOptions ...string) ApplierConfig {
 	return func(a *applier) {
 		a.goTmplOptions = append(a.goTmplOptions, goTmplOptions...)
+	}
+}
+
+// WithNoValuePolicy modifies NewApplier so that the returned Applier checks
+// rendered output for the residual "<no value>" literal (emitted by
+// text/template for missing or nil values when a lenient missingkey option
+// is used) and reacts according to the given policy. The default policy is
+// options.NoValueWarn.
+//
+// Note: the check is a plain substring check on the rendered output. If a
+// template legitimately needs to emit the literal "<no value>", there is no
+// way to escape it; disable the check with options.NoValueIgnore instead.
+func WithNoValuePolicy(policy options.NoValuePolicy) ApplierConfig {
+	return func(a *applier) {
+		a.noValuePolicy = policy
 	}
 }
 
@@ -70,9 +93,16 @@ func WithSafeYAMLTemplaterOverride() ApplierConfig {
 // NewApplier creates a new options applier instance using the specified
 // ApplierConfigs.
 func NewApplier(opts ...ApplierConfig) options.Applier {
-	a := &applier{}
+	a := &applier{
+		noValuePolicy: options.NoValueWarn,
+	}
 	for _, opt := range opts {
 		opt(a)
+	}
+	if len(a.goTmplOptions) == 0 {
+		// Default to failing on missing keys, consistent with the
+		// patch-template applier. Use WithGoTmplOptions to override.
+		a.goTmplOptions = []string{options.MissingKeyError}
 	}
 	return a
 }
@@ -88,6 +118,13 @@ func NewApplier(opts ...ApplierConfig) options.Applier {
 func (m *applier) ApplyOptions(comp *bundle.Component, opts options.JSONOptions) (*bundle.Component, error) {
 	// Make a copy to avoid confusing behavior.
 	comp = comp.DeepCopy()
+
+	// Resolve component-scoped options: global options overlaid with the
+	// blocks matching this component's name and name@version.
+	opts, err := options.OptionsForComponent(comp.ComponentReference(), opts)
+	if err != nil {
+		return comp, fmt.Errorf("for component %v, resolving scoped options: %v", comp.ComponentReference(), err)
+	}
 
 	matched, notMatched := options.PartitionObjectTemplates(comp.Spec.Objects, string(bundle.TemplateTypeGo))
 
@@ -132,6 +169,10 @@ func (m *applier) applyOptions(obj *unstructured.Unstructured, ref bundle.Compon
 	err = tmpl.Execute(&buf, opts)
 	if err != nil {
 		return nil, fmt.Errorf("error executing template for object %v: %v", obj.GetName(), err)
+	}
+
+	if err := options.CheckNoValueResidue(buf.String(), fmt.Sprintf("object template %q", obj.GetName()), m.noValuePolicy); err != nil {
+		return nil, err
 	}
 
 	// performed by go-yaml: https://godoc.org/gopkg.in/yaml.v2

@@ -40,12 +40,14 @@ go_test(
     name = "go_default_test",
     srcs = [
         "patch_benchmark_test.go",
+        "patch_scope_test.go",
         "patch_test.go",
     ],
     embed = [":go_default_library"],
     deps = [
         "//pkg/converter:go_default_library",
         "//pkg/filter:go_default_library",
+        "//pkg/options:go_default_library",
         "//pkg/testutil:go_default_library",
     ],
 )

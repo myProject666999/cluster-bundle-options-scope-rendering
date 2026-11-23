@@ -10,12 +10,20 @@ go_library(
         "//pkg/options:go_default_library",
         "//pkg/options/gotmpl:go_default_library",
         "//pkg/options/patchtmpl:go_default_library",
+        "@io_k8s_klog//:go_default_library",
     ],
 )
 
 go_test(
     name = "go_default_test",
-    srcs = ["multi_test.go"],
+    srcs = [
+        "multi_scope_test.go",
+        "multi_test.go",
+    ],
     embed = [":go_default_library"],
-    deps = ["//pkg/converter:go_default_library"],
+    deps = [
+        "//pkg/converter:go_default_library",
+        "//pkg/options:go_default_library",
+        "//pkg/testutil:go_default_library",
+    ],
 )

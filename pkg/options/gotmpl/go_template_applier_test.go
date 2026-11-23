@@ -524,7 +524,31 @@ spec:
         - name: logger
           image: '{{.NotHere}}'`
 
+// TestMissingValueOK verifies that the historical lenient behavior is still
+// available via an explicit opt-out: with missingkey=default, a missing key
+// renders as "<no value>" instead of producing an error. The "<no value>"
+// residue check is disabled here so the warning policy does not fire.
 func TestMissingValueOK(t *testing.T) {
+	comp, err := converter.FromYAMLString(missingValueComponent).ToComponent()
+	if err != nil {
+		t.Fatalf("Unexpected failure parsing component: %v", err)
+	}
+
+	applier := NewApplier(
+		WithGoTmplOptions(options.MissingKeyDefault),
+		WithNoValuePolicy(options.NoValueIgnore),
+	)
+
+	_, err = applier.ApplyOptions(comp, map[string]interface{}{})
+	if err != nil {
+		t.Errorf("During ApplyOptions(): got %q, want nil", err)
+	}
+}
+
+// TestMissingValueErrorDefault verifies that, by default (no explicit
+// template options), a missing key is an error, consistent with the
+// patch-template applier.
+func TestMissingValueErrorDefault(t *testing.T) {
 	comp, err := converter.FromYAMLString(missingValueComponent).ToComponent()
 	if err != nil {
 		t.Fatalf("Unexpected failure parsing component: %v", err)
@@ -533,8 +557,15 @@ func TestMissingValueOK(t *testing.T) {
 	applier := NewApplier()
 
 	_, err = applier.ApplyOptions(comp, map[string]interface{}{})
-	if err != nil {
-		t.Errorf("During ApplyOptions(): got %q, want nil", err)
+	if err == nil {
+		t.Fatalf("During ApplyOptions(): got nil error, wanted non-nil error")
+	}
+	// The error must identify the component, the object template, the
+	// template position, and the missing key path.
+	for _, want := range []string{"data-component", "8:14", `key "NotHere"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err.Error(), want)
+		}
 	}
 }
 

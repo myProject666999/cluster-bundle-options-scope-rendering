@@ -222,22 +222,89 @@ func ParseStringMap(p string) map[string]string {
 	return m
 }
 
-// MergeOptions reads multiple options files and combines them into a single map.
-// Option values will be overwritten if a later file has the same key.
+// MergeOptions reads multiple options files and combines them into a single
+// map.
+//
+// Files are merged strictly in the order they are given on the command line,
+// using a top-level shallow merge: for every top-level key, a later file's
+// value — whether a scalar, a map, or an array — replaces the earlier value
+// wholesale. Nested maps are not merged recursively: {"net": {"cidr": ...}}
+// followed by {"net": {"mtu": 1500}} yields only {"net": {"mtu": 1500}}; the
+// cidr entry is lost. A null value is stored as-is; it is not interpreted as
+// a deletion.
+//
+// Keys are case-sensitive, and dots in keys are literal: a key named "a.b"
+// is a single flat key, not the nested path a.b — which also means a
+// template reading {{.a.b}} cannot be satisfied by a key named "a.b".
+//
+// Each file may contain a reserved top-level key (options.ScopedOptionsKey,
+// "components", or its prefixed alias options.ScopedOptionsKeyPrefixed) that
+// scopes options to individual components; see the options package for the
+// scoping semantics. Scoped blocks are split out of each file before
+// merging and recombined afterwards, so a file that does not mention a
+// component never deletes another file's scoped configuration for that
+// component.
+//
+// Every error includes the offending file name and a failure category
+// (unreadable file, unrecognized extension, empty file, top-level value not
+// an object, malformed scoped block). Repeating the same file on the command
+// line logs a warning; the file is still merged at each position it appears.
 func MergeOptions(ctx context.Context, rw files.FileReaderWriter, files []string) (options.JSONOptions, error) {
-	optData := make(map[string]interface{})
+	global := make(options.JSONOptions)
+	var scoped map[string]options.JSONOptions
+	seen := make(map[string]bool)
 	for _, f := range files {
-		bytes, err := rw.ReadFile(ctx, f)
+		if seen[f] {
+			log.Warningf("options file %q was specified multiple times; merging it again", f)
+		}
+		seen[f] = true
+
+		data, err := readOptionsFile(ctx, rw, f)
 		if err != nil {
 			return nil, err
 		}
-		data, err := converter.FromFileName(f, bytes).ToJSONMap()
+
+		fileGlobal, fileScoped, err := options.SplitScopedOptions(data)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("options file %q: invalid scoped options: %v", f, err)
 		}
-		for k, v := range data {
-			optData[k] = v
-		}
+		global = options.MergeShallowOptions(global, fileGlobal)
+		scoped = options.MergeScopedOptions(scoped, fileScoped)
 	}
-	return optData, nil
+	return options.CombineScopedOptions(global, scoped), nil
+}
+
+// readOptionsFile reads and parses a single options file, returning the
+// top-level object. All errors include the file name and a failure category.
+func readOptionsFile(ctx context.Context, rw files.FileReaderWriter, fname string) (options.JSONOptions, error) {
+	if formatFromFile(fname) == "" {
+		return nil, fmt.Errorf("options file %q: unrecognized extension: file must end in .yaml, .yml, or .json", fname)
+	}
+
+	bytes, err := rw.ReadFile(ctx, fname)
+	if err != nil {
+		return nil, fmt.Errorf("options file %q: unreadable: %v", fname, err)
+	}
+	if len(bytes) == 0 {
+		return nil, fmt.Errorf("options file %q: empty file: an options file must contain a YAML or JSON object", fname)
+	}
+
+	// Decode into a generic value first so that a non-object top level can be
+	// reported with a clear category.
+	var raw interface{}
+	if err := converter.FromFileName(fname, bytes).ToObject(&raw); err != nil {
+		return nil, fmt.Errorf("options file %q: parse error: %v", fname, err)
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("options file %q: empty file: an options file must contain a YAML or JSON object", fname)
+	}
+	data, ok := raw.(map[string]interface{})
+	if !ok {
+		category := "scalar"
+		if _, isSlice := raw.([]interface{}); isSlice {
+			category = "array"
+		}
+		return nil, fmt.Errorf("options file %q: top-level value must be an object, got %s", fname, category)
+	}
+	return data, nil
 }
